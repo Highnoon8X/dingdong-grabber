@@ -15,10 +15,19 @@ specific language governing permissions and limitations
 under the License.
 */
 
-package strategy
+package notice
 
-import "context"
+import (
+	"testing"
+)
 
-type Interface interface {
-	Schedule(ctx context.Context) error
+func TestPlay(t *testing.T) {
+	go func() {
+		if err := NewDefaultMp3(); err != nil {
+			panic(err)
+		}
+	}()
+	t.Log("播放成功")
+	// 取消select{}注释测试播放
+	//select {}
 }

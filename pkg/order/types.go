@@ -1,3 +1,20 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
 package order
 
 type Cart struct {
@@ -63,13 +80,9 @@ type Orders struct {
 }
 
 type OrderDetail struct {
-	FreightDiscountMoney string            `json:"freight_discount_money"` // 配送费折扣
-	FreightMoney         string            `json:"freight_money"`          // 配送费
-	TotalMoney           string            `json:"total_money"`            // 订单总价格
-	FreightRealMoney     string            `json:"freight_real_money"`     // 最终的配送费
-	DefaultCoupon        map[string]Coupon `json:"default_coupon"`         // 购物券
-}
-
-type Coupon struct {
-	Id string `json:"_id"`
+	FreightDiscountMoney string                 `json:"freight_discount_money"` // 配送费折扣
+	FreightMoney         string                 `json:"freight_money"`          // 配送费
+	TotalMoney           string                 `json:"total_money"`            // 订单总价格
+	FreightRealMoney     string                 `json:"freight_real_money"`     // 最终的配送费
+	DefaultCoupon        map[string]interface{} `json:"default_coupon"`         // 购物券
 }

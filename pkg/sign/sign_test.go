@@ -15,10 +15,23 @@ specific language governing permissions and limitations
 under the License.
 */
 
-package strategy
+package sign
 
-import "context"
+import (
+	"testing"
 
-type Interface interface {
-	Schedule(ctx context.Context) error
+	"github.com/dingdong-grabber/pkg/util"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSign(t *testing.T) {
+	defer util.ClearSignConfigFile()
+	s, err := NewDefaultJsSign()
+	assert.NoError(t, err)
+	got, err := s.Sign("6b7ed2c2051cb9e069d0e499a732ce9db8ce96fd", map[string]string{
+		"cookie": "ede2c413e49d1a65566e12c27c819",
+		"uid":    "647723be79400013ab",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "7bb06cf6f25140f1697035d47957d6e2", got["sign"])
 }

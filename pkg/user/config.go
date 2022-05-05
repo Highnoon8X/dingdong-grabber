@@ -1,3 +1,20 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
 package user
 
 import (
@@ -8,6 +25,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dingdong-grabber/pkg/config"
+	"github.com/dingdong-grabber/pkg/user/ios"
+
 	"github.com/dingdong-grabber/pkg/constants"
 	"github.com/dingdong-grabber/pkg/http"
 	"k8s.io/klog"
@@ -15,29 +35,41 @@ import (
 
 type User struct {
 	c          *http.Client
+	conf       *config.Config
+	device     DeviceInterface
 	userDetail *UserDetail
 	addressId  string
 	headers    map[string]string
-	body       url.Values
+	params     url.Values
 	mtx        sync.RWMutex
 }
 
-func NewDefaultUser() *User {
-	return &User{
-		c: &http.Client{},
+func NewDefaultUser(conf *config.Config) *User {
+	u := &User{
+		c:       &http.Client{},
+		conf:    conf,
+		headers: make(map[string]string),
+		params:  url.Values{},
 	}
+	u.device = getDevice(conf)
+	return u
 }
 
-func (u *User) SetUserDetail(userDetail *UserDetail) {
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
-	u.userDetail = userDetail
-}
-
-func (u *User) UserDetail() *UserDetail {
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
-	return u.userDetail
+func getDevice(conf *config.Config) DeviceInterface {
+	var device DeviceInterface
+	switch conf.Device {
+	case config.IosType:
+		device = ios.NewIosDevice()
+	case config.AndroidType:
+	case config.DefaultType:
+		if conf.Cookie == "" {
+			klog.Fatal("默认模式下cookie为必填项")
+		}
+		device = ios.NewIosDevice()
+	default:
+		klog.Fatalf("暂不支持此设备类型: %s，支持: [ios, android, default]", conf.Device)
+	}
+	return device
 }
 
 func (u *User) AddressId() string {
@@ -52,50 +84,34 @@ func (u *User) SetAddressId(addressId string) {
 	u.addressId = addressId
 }
 
-func (u *User) SetClient(url string) {
-	u.mtx.Lock()
-	defer u.mtx.Unlock()
-	u.c.Url = url
-}
+func (u *User) LoadConfig() error {
+	var file = "cart.chlsj"
+	if u.conf.Device != config.IosType {
+		file = "example.chlsj"
+	}
+	if err := u.device.LoadConfig(file); err != nil {
+		klog.Fatal(err)
+	}
+	// 设置header
+	u.SetHeaders(u.device.Headers())
+	// 设置 query params
+	u.SetQueryParams(u.device.QueryParams())
 
-func (u *User) Client() *http.Client {
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
-	return u.c
-}
-
-func (u *User) SetStationId(stationId string) {
-	var (
-		headers = u.Headers()
-		body    = u.Body()
-	)
-	u.mtx.Lock()
-	defer u.mtx.Unlock()
-	headers["ddmc-station-id"] = stationId
-	body["station_id"] = []string{stationId}
-}
-
-func (u *User) SetCityNumber(cityNumber string) {
-	var (
-		headers = u.Headers()
-		body    = u.Body()
-	)
-	u.mtx.Lock()
-	defer u.mtx.Unlock()
-	headers["ddmc-city-number"] = cityNumber
-	body["city_number"] = []string{cityNumber}
-}
-
-func (u *User) LoadConfig(cookie string) error {
-	if cookie == "" {
-		klog.Fatal("请求头cookie为必填项")
+	if u.conf.Device != config.IosType {
+		u.SetHeaders(map[string]string{
+			"cookie": u.conf.Cookie,
+		})
 	}
 
-	// 设置Header默认请求参数
-	u.SetDefaultHeaders(cookie)
+	ud, err := u.GetUserDetail()
+	if err != nil {
+		return err
+	}
 
-	// 设置Body默认请求参数
-	u.SetDefaultBody()
+	// 设置header im_secret
+	u.SetHeaders(map[string]string{
+		"im_secret": ud.UserInfo.ImSecret,
+	})
 
 	addr, err := u.GetDefaultAddr()
 	if err != nil {
@@ -104,59 +120,64 @@ func (u *User) LoadConfig(cookie string) error {
 	// 设置收货地址ID
 	u.SetAddressId(addr.Id)
 
-	// 设置收货站ID
-	u.SetStationId(addr.StationId)
-
-	// 设置城市编码
-	u.SetCityNumber(addr.CityNumber)
-
-	ud, err := u.GetUserDetail()
-	if err != nil {
-		return err
-	}
-	// 设置用户详情
-	u.SetUserDetail(ud)
-
-	// 设置header ddmc uid
+	// 设置Header和Query params收货站ID,城市编码和经纬度
 	u.SetHeaders(map[string]string{
-		"ddmc-uid": ud.UserInfo.Id,
+		"ddmc-station-id":  addr.StationId,
+		"ddmc-city-number": addr.CityNumber,
+		"ddmc-longitude":   fmt.Sprintf("%v", addr.Location.Location[0]),
+		"ddmc-latitude":    fmt.Sprintf("%v", addr.Location.Location[1]),
+	})
+	u.SetQueryParams(map[string]string{
+		"station_id":  addr.StationId,
+		"city_number": addr.CityNumber,
+		"longitude":   fmt.Sprintf("%v", addr.Location.Location[0]),
+		"latitude":    fmt.Sprintf("%v", addr.Location.Location[1]),
 	})
 
-	// 设置body uid
-	u.SetBody(map[string]string{
-		"uid": ud.UserInfo.Id,
-	})
 	return nil
 }
 
 func (u *User) SetDefaultHeaders(cookie string) {
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
-	if !strings.HasPrefix(cookie, "DDXQSESSID") {
-		cookie = fmt.Sprintf("DDXQSESSID=%s", cookie)
+	u.mtx.Lock()
+	defer u.mtx.Unlock()
+	if !strings.HasPrefix(cookie, constants.CookiePrefix) {
+		cookie = fmt.Sprintf("%s=%s", constants.CookiePrefix, cookie)
 	}
 	u.headers = map[string]string{
 		// Header必填项
-		"cookie": cookie,
+		"cookie":           cookie,
+		constants.ImSecret: "", // 自动获取
 
 		// 根据cookie动态获取
 		"ddmc-uid": "",
 
-		// 下面作为小程序2.83.0版本的默认值
-		"ddmc-build-version": "2.83.0",
+		// 设置经纬度, 获取默认地址时会自动添加
+		"ddmc-longitude":         "",
+		"ddmc-latitude":          "",
+		"ddmc-country-code":      "CN",
+		"ddmc-locale-identifier": "zh_CN",
+
+		// 下面作为小程序2.85.2版本的默认值
+		"ddmc-build-version": "1232",
+		"ddmc-sdkversion":    "2.13.2",
 		"ddmc-city-number":   "", // 程序会自动获取默认地址的city number填充于此
 		"ddmc-station-id":    "", // 程序会自动获取默认地址的station id填充于此
 		"ddmc-time":          fmt.Sprintf("%d", time.Now().UnixMilli()/1000),
-		"ddmc-channel":       "applet",
-		"ddmc-os-version":    "[object Undefined]",
-		"ddmc-app-client-id": "4",
+		"ddmc-channel":       "App Store",
+		"ddmc-os-version":    "15.5",
+		"ddmc-app-client-id": "1",
 		"ddmc-ip":            "",
-		"ddmc-api-version":   "9.50.0",
+		"ddmc-language-code": "zh",
+		"ddmc-api-version":   "9.50.2",
 		"ddmc-device-id":     "",
-		"referer":            "https://servicewechat.com/wx1e113254eda17715/425/page-frame.html",
+		"ddmc-device-model":  "",
+		"ddmc-device-name":   "",
+		"ddmc-device-token":  "",
+		"ddmc-idfa":          "",
+		"referer":            "https://servicewechat.com/wx1e113254eda17715/435/page-frame.html",
 		"content-type":       "application/x-www-form-urlencoded",
 		"accept":             "*/*",
-		"user-agent":         "Mozilla/5.0 (iPhone; CPU iPhone OS 11_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E217 MicroMessenger/6.8.0(0x16080000) NetType/WIFI Language/en Branch/Br_trunk MiniProgramEnv/Mac",
+		"user-agent":         "user-agent",
 		// 不要添加此accept encoding，否则结果会被压缩乱码返回
 		//"accept-encoding":    "gzip,compress,br,deflate",
 	}
@@ -164,105 +185,93 @@ func (u *User) SetDefaultHeaders(cookie string) {
 
 // SetHeaders 设置header参数，避免header因多并发引起的concurrent map writes
 func (u *User) SetHeaders(headers map[string]string) {
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
+	u.mtx.Lock()
+	defer u.mtx.Unlock()
 	for k, v := range headers {
 		u.headers[k] = v
 	}
 }
 
+// Headers 返回请求headers的复制
 func (u *User) Headers() map[string]string {
 	u.mtx.RLock()
 	defer u.mtx.RUnlock()
-	return u.headers
-}
-
-// HeadersDeepCopy 为了避免多并发造成的并发读写问题: fatal error: concurrent map read and map write
-func (u *User) HeadersDeepCopy() map[string]string {
-	var headers = u.Headers()
-	u.mtx.Lock()
-	defer u.mtx.Unlock()
 	var cp = make(map[string]string)
-	for k, v := range headers {
+	for k, v := range u.headers {
 		cp[k] = v
 	}
 	return cp
 }
 
-// SetDefaultBody 设置默认的用户初始化数据
-func (u *User) SetDefaultBody() {
-	var headers = u.Headers()
-	u.mtx.RLock()
-	defer u.mtx.RUnlock()
-	u.body = url.Values{
+// SetDefaultParams 设置默认的用户初始化数据
+func (u *User) SetDefaultParams() {
+	u.mtx.Lock()
+	defer u.mtx.Unlock()
+	var headers = u.headers
+	u.params = url.Values{
 		"s_id":         []string{""},
 		"device_token": []string{""},
 
-		// 下面作为小程序2.83.0版本的默认值
-		"uid":           []string{headers["ddmc-uid"]},
-		"longitude":     []string{headers["ddmc-longitude"]},
-		"latitude":      []string{headers["ddmc-latitude"]},
-		"station_id":    []string{headers["ddmc-station-id"]},
-		"city_number":   []string{headers["ddmc-city-number"]},
-		"api_version":   []string{headers["ddmc-api-version"]},
-		"app_version":   []string{headers["ddmc-build-version"]},
-		"time":          []string{headers["ddmc-time"]},
-		"openid":        []string{headers["ddmc-device-id"]},
-		"applet_source": []string{""},
-		"channel":       []string{"applet"},
-		"app_client_id": []string{"4"},
-		"sharer_uid":    []string{""},
-		"h5_source":     []string{""},
+		// 下面作为小程序2.85.2版本的默认值
+		"uid":              []string{headers["ddmc-uid"]},
+		"longitude":        []string{headers["ddmc-longitude"]},
+		"latitude":         []string{headers["ddmc-latitude"]},
+		"station_id":       []string{headers["ddmc-station-id"]},
+		"city_number":      []string{headers["ddmc-city-number"]},
+		"api_version":      []string{headers["ddmc-api-version"]},
+		"app_version":      []string{headers["ddmc-build-version"]},
+		"time":             []string{headers["ddmc-time"]},
+		"openid":           []string{headers["ddmc-device-id"]},
+		"buildVersion":     []string{headers["ddmc-device-id"]},
+		"countryCode":      []string{headers["ddmc-country-code"]},
+		"idfa":             []string{headers["ddmc-idfa"]},
+		"ip":               []string{headers["ddmc-ip"]},
+		"localeidentifier": []string{headers["ddmc-locale-identifier"]},
+		"app_client_id":    []string{headers["ddmc-app-client-id"]},
+		"applet_source":    []string{""},
+		"channel":          []string{"App Store"},
+		"sharer_uid":       []string{""},
+		"h5_source":        []string{""},
 	}
 }
 
-// SetBody 设置body参数，避免body因多并发引起的concurrent map writes
-func (u *User) SetBody(body map[string]string) {
+// SetQueryParams 设置query params参数，避免因多并发引起的concurrent map writes
+func (u *User) SetQueryParams(params map[string]string) {
 	u.mtx.Lock()
 	defer u.mtx.Unlock()
-	for k, v := range body {
-		u.body[k] = []string{v}
+	for k, v := range params {
+		u.params[k] = []string{v}
 	}
 }
 
-func (u *User) Body() url.Values {
+// QueryParams 返回query params的复制
+func (u *User) QueryParams() url.Values {
 	u.mtx.RLock()
 	defer u.mtx.RUnlock()
-	return u.body
-}
-
-// BodyDeepCopy 为了避免多并发造成的并发读写问题: fatal error: concurrent map read and map write
-func (u *User) BodyDeepCopy() url.Values {
-	var body = u.Body()
-	u.mtx.Lock()
-	defer u.mtx.Unlock()
 	var cp = make(url.Values)
-	for k, v := range body {
+	for k, v := range u.params {
 		cp[k] = v
 	}
 	return cp
 }
 
 func (u *User) GetUserDetail() (*UserDetail, error) {
-	// body参数为共享，提交购物车时添加了products等参数，可能会导致请求参数过长造成invalid character '<' looking for beginning of value，这里重新设置为空字符
-	u.SetBody(map[string]string{
-		"products":      "",
-		"package_order": "",
-		"packages":      "",
-	})
+	client := http.NewClient(constants.UserDetail)
+	params := u.QueryParams()
 
-	u.SetClient(constants.UserDetail)
-	resp, err := u.Client().Get(u.HeadersDeepCopy(), u.BodyDeepCopy())
+	resp, err := client.Get(u.Headers(), params)
 	if err != nil {
-		klog.Info(err.Error())
 		return nil, err
 	}
 
-	var ud UserDetail
-	userBytes, _ := json.Marshal(resp.Data)
-	if err := json.Unmarshal(userBytes, &ud); err != nil {
+	return u.DecodeUser(resp.Data)
+}
+
+func (u *User) DecodeUser(data interface{}) (*UserDetail, error) {
+	bytes, _ := json.Marshal(data)
+	if err := json.Unmarshal(bytes, &u.userDetail); err != nil {
 		return nil, fmt.Errorf("解析用户数据出错, 错误: %v", err.Error())
 	}
-	klog.Infof("获取用户信息成功, 用户: %s, id: %s", ud.UserInfo.Name, ud.UserInfo.Id)
-	return &ud, nil
+	klog.Infof("获取用户信息成功, 用户: %s, id: %s", u.userDetail.UserInfo.Name, u.userDetail.UserInfo.Id)
+	return u.userDetail, nil
 }

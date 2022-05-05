@@ -15,10 +15,8 @@ specific language governing permissions and limitations
 under the License.
 */
 
-package strategy
+package sign
 
-import "context"
-
-type Interface interface {
-	Schedule(ctx context.Context) error
+type SignInterface interface {
+	Sign(secret string, data interface{}) (map[string]string, error)
 }

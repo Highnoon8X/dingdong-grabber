@@ -1,27 +1,45 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
 package order
 
 import (
 	"encoding/json"
 
 	"github.com/dingdong-grabber/pkg/constants"
+	"github.com/dingdong-grabber/pkg/http"
 	"k8s.io/klog"
 )
 
 // CheckAll 勾选购物车全选按钮
 func (o *Order) CheckAll() error {
+	var (
+		client = http.NewClient(constants.CartCheck)
+		params = o.user.QueryParams()
+	)
 	// 关键参数，必须要带
-	o.user.SetBody(map[string]string{
-		"is_check": "1",
-		"is_load":  "1",
-
-		// body参数为共享，提交购物车时添加了products等参数，可能会导致请求参数过长造成invalid character '<' looking for beginning of value，这里重新设置为空字符
-		"products":      "",
-		"package_order": "",
-		"packages":      "",
+	client.SetParams(params, map[string]string{
+		"ab_config": `{"key_cart_discount_price":"C","key_no_condition_barter":true,"key_show_cart_barter":"0"}`,
+		"is_check":  "1",
+		"is_load":   "1",
+		"is_filter": "0",
 	})
 
-	o.user.SetClient(constants.CartCheck)
-	if _, err := o.user.Client().Get(o.user.HeadersDeepCopy(), o.user.BodyDeepCopy()); err != nil {
+	if _, err := client.Get(o.user.Headers(), params); err != nil {
 		klog.Infof("勾选购物车全选按钮失败, 错误: %v", err)
 		return err
 	}
@@ -32,18 +50,17 @@ func (o *Order) CheckAll() error {
 
 // GetCart 获取购物车商品信息
 func (o *Order) GetCart() (map[string]interface{}, error) {
-	o.user.SetBody(map[string]string{
-		"is_load":   "1",                                                       // 关键参数，必须要带
-		"ab_config": "{\"key_onion\":\"D\",\"key_cart_discount_price\":\"C\"}", // 可选参数
-
-		// body参数为共享，提交购物车时添加了products等参数，可能会导致请求参数过长造成invalid character '<' looking for beginning of value，这里重新设置为空字符
-		"products":      "",
-		"package_order": "",
-		"packages":      "",
+	var (
+		client = http.NewClient(constants.Cart)
+		params = o.user.QueryParams()
+	)
+	client.SetParams(params, map[string]string{
+		"is_filter": "0",                                                                                          // 关键参数，必须要带
+		"is_load":   "1",                                                                                          // 关键参数，必须要带
+		"ab_config": `{"key_show_cart_barter":"0","key_no_condition_barter":false,"key_cart_discount_price":"C"}`, // 可选参数
 	})
 
-	o.user.SetClient(constants.Cart)
-	resp, err := o.user.Client().Get(o.user.HeadersDeepCopy(), o.user.BodyDeepCopy())
+	resp, err := client.Get(o.user.Headers(), params)
 	if err != nil {
 		klog.Errorf("获取购物车商品失败, 错误: %v", err)
 		return nil, err

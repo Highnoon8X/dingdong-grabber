@@ -15,10 +15,8 @@ specific language governing permissions and limitations
 under the License.
 */
 
-package strategy
+package notice
 
-import "context"
-
-type Interface interface {
-	Schedule(ctx context.Context) error
+type NoticeInterface interface {
+	Notify() error
 }

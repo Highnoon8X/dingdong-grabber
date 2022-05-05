@@ -1,12 +1,29 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
 package order
 
 import (
 	"encoding/json"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/dingdong-grabber/pkg/constants"
+	"github.com/dingdong-grabber/pkg/http"
 	"github.com/dingdong-grabber/pkg/user"
 	"github.com/google/uuid"
 	"k8s.io/klog"
@@ -15,8 +32,10 @@ import (
 type Strategy int
 
 const (
-	ManualStrategy Strategy = 0 // 人工
-	TimingStrategy Strategy = 1 // 定时
+	ManualStrategy   Strategy = 0 // 人工
+	TimingStrategy   Strategy = 1 // 定时
+	SentinelStrategy Strategy = 2 // 哨兵
+	TestStrategy     Strategy = 3 // 测试
 )
 
 type Order struct {
@@ -92,17 +111,21 @@ func (o *Order) CheckOrder() map[string]interface{} {
 
 // GetMultiReserveTime 获取配送时间
 func (o *Order) GetMultiReserveTime() (map[string]interface{}, error) {
-	products, _ := json.Marshal([]interface{}{o.cart["products"]})
-	o.user.SetBody(map[string]string{
+	var (
+		client      = http.NewClient(constants.ReserveTime)
+		params      = o.user.QueryParams()
+		products, _ = json.Marshal(o.cart["products"])
+	)
+
+	products, _ = json.Marshal([]interface{}{string(products)})
+	client.SetParams(params, map[string]string{
 		// 关键参数
-		"address_id":      o.user.AddressId(),
-		"products":        string(products),
-		"group_config_id": "",
-		"isBridge":        "false",
+		"ab_config":  `{"ETA_time_default_selection":"D1.2"}`,
+		"address_id": o.user.AddressId(),
+		"products":   string(products),
 	})
 
-	o.user.SetClient(constants.ReserveTime)
-	resp, err := o.user.Client().Post(o.user.HeadersDeepCopy(), o.user.BodyDeepCopy())
+	resp, err := client.Post(o.user.Headers(), params)
 	if err != nil {
 		klog.Errorf("获取预约时间失败, 错误: %v", err)
 		return nil, err
@@ -126,7 +149,7 @@ func (o *Order) GetMultiReserveTime() (map[string]interface{}, error) {
 		if d.DisableType == 0 && !strings.Contains(d.SelectMsg, "尽快") {
 			reservedTime["reserved_time_start"] = d.StartTimestamp
 			reservedTime["reserved_time_end"] = d.EndTimestamp
-			klog.Infof("更新配送时间成功, 配送时间段: [%v, %v]", timestamp2Str(d.StartTimestamp), timestamp2Str(d.EndTimestamp))
+			klog.Infof("更新配送时间成功, 配送时间段: %s", d.SelectMsg)
 			return reservedTime, nil
 		}
 	}
@@ -140,66 +163,44 @@ func (o *Order) GetMultiReserveTime() (map[string]interface{}, error) {
 	return nil, nil
 }
 
-func timestamp2Str(tst int64) string {
-	return time.Unix(tst, 0).Format("2006-01-02 15:04:05")
-}
-
 // GetCheckOrder 获取订单确认信息
 func (o *Order) GetCheckOrder() (map[string]interface{}, error) {
-	cart := o.Cart()
+	var (
+		client = http.NewClient(constants.CheckOrder)
+		params = o.user.QueryParams()
+		cart   = o.Cart()
+	)
+
 	// 构造商品参数信息
 	packages := map[string]interface{}{
-		"products":                  cart["products"],
-		"total_money":               cart["total_money"],
-		"total_origin_money":        cart["total_origin_money"],
-		"goods_real_money":          cart["goods_real_money"],
-		"total_count":               cart["total_count"],
-		"cart_count":                cart["cart_count"],
-		"is_presale":                cart["is_presale"],
-		"instant_rebate_money":      cart["instant_rebate_money"],
-		"coupon_rebate_money":       cart["coupon_rebate_money"],
-		"total_rebate_money":        cart["total_rebate_money"],
-		"used_balance_money":        cart["used_balance_money"],
-		"can_used_balance_money":    cart["can_used_balance_money"],
-		"used_point_num":            cart["used_point_num"],
-		"used_point_money":          cart["used_point_money"],
-		"can_used_point_num":        cart["can_used_point_num"],
-		"can_used_point_money":      cart["can_used_point_money"],
-		"is_share_station":          cart["is_share_station"],
-		"only_today_products":       cart["only_today_products"],
-		"only_tomorrow_products":    cart["only_tomorrow_products"],
-		"package_type":              cart["package_type"],
-		"package_id":                cart["package_id"],
-		"front_package_text":        cart["front_package_text"],
-		"front_package_type":        cart["front_package_type"],
-		"front_package_stock_color": cart["front_package_stock_color"],
-		"front_package_bg_color":    cart["front_package_bg_color"],
+		"products":                cart["products"],
+		"real_match_supply_order": false,
+		"is_supply_order":         false,
+		"package_type":            1,
+		"package_id":              1,
 		"reserved_time": map[string]interface{}{
+			"time_biz_type":       0,
 			"reserved_time_start": o.ReservedTime()["reserved_time_start"],
 			"reserved_time_end":   o.ReservedTime()["reserved_time_end"],
 		},
 	}
 	packagesBytes, _ := json.Marshal([]interface{}{packages})
 
-	o.user.SetBody(map[string]string{
+	client.SetParams(params, map[string]string{
 		// 设置基础参数信息
-		"address_id":               o.user.AddressId(),
-		"user_ticket_id":           "default",
-		"freight_ticket_id":        "default",
-		"is_use_point":             "0",
-		"is_use_balance":           "0",
-		"is_buy_vip":               "0",
-		"coupons_id":               "",
-		"is_buy_coupons":           "0",
-		"check_order_type":         "0",
-		"is_support_merge_payment": "1",
-		"showData":                 "true",
-		"showMsg":                  "false",
-		"packages":                 string(packagesBytes),
+		"address_id":        o.user.AddressId(),
+		"user_ticket_id":    "default",
+		"freight_ticket_id": "default",
+		"is_use_point":      "0",
+		"is_use_balance":    "1",
+		"is_buy_vip":        "0",
+		"coupons_id":        "",
+		"is_buy_coupons":    "0",
+		"check_order_type":  "0",
+		"packages":          string(packagesBytes),
 	})
 
-	o.user.SetClient(constants.CheckOrder)
-	resp, err := o.user.Client().Post(o.user.HeadersDeepCopy(), o.user.BodyDeepCopy())
+	resp, err := client.Post(o.user.Headers(), params)
 	if err != nil {
 		klog.Errorf("获取订单确认信息失败, 错误: %s", err.Error())
 		return nil, err
@@ -213,72 +214,80 @@ func (o *Order) GetCheckOrder() (map[string]interface{}, error) {
 	}
 
 	klog.Info("确认订单信息成功")
+	var ticketId = orders.Order.DefaultCoupon["default_coupon"]
+	if ticketId != nil {
+		switch ticketId.(type) {
+		case map[string]interface{}:
+			ticketId = ticketId.(map[string]interface{})["_id"]
+		case map[string]string:
+			ticketId = ticketId.(map[string]string)["_id"]
+		case map[interface{}]interface{}:
+			ticketId = ticketId.(map[interface{}]interface{})["_id"]
+		default:
+			ticketId = nil
+		}
+	}
 	return map[string]interface{}{
 		"total_money":            orders.Order.TotalMoney,
 		"freight_discount_money": orders.Order.FreightDiscountMoney,
 		"freight_money":          orders.Order.FreightMoney,
 		"freight_real_money":     orders.Order.FreightRealMoney,
-		"user_ticket_id":         orders.Order.DefaultCoupon["default_coupon"].Id,
+		"user_ticket_id":         ticketId,
 	}, nil
 }
 
 // SubmitOrder 提交订单
 func (o *Order) SubmitOrder() (bool, error) {
-	reservedTime := o.ReservedTime()
-	checkOrder := o.CheckOrder()
-	cart := o.Cart()
+	var (
+		client       = http.NewClient(constants.SubmitOrder)
+		params       = o.user.QueryParams()
+		reservedTime = o.ReservedTime()
+		checkOrder   = o.CheckOrder()
+		cart         = o.Cart()
+	)
+
 	paymentOrder := map[string]interface{}{
-		"reserved_time_start":    reservedTime["reserved_time_start"],
-		"reserved_time_end":      reservedTime["reserved_time_end"],
 		"price":                  checkOrder["total_money"],
 		"freight_discount_money": checkOrder["freight_discount_money"],
 		"freight_money":          checkOrder["freight_money"],
 		"order_freight":          checkOrder["freight_real_money"],
 		"parent_order_sign":      cart["parent_order_sign"],
-		"product_type":           1,
 		"address_id":             o.user.AddressId(),
 		"form_id":                strings.ReplaceAll(uuid.New().String(), "-", ""),
-		"receipt_without_sku":    nil,
-		"pay_type":               6, // 2: 支付宝支付, 4: 微信支付，6: 微信小程序支付
+		"receipt_without_sku":    "0",
+		"pay_type":               2,
 		"user_ticket_id":         checkOrder["user_ticket_id"],
-		"vip_money":              "",
-		"vip_buy_user_ticket_id": "",
-		"coupons_money":          "",
-		"coupons_id":             "",
+		"current_position":       []string{params["latitude"][0], params["longitude"][0]},
 	}
 	packages := []map[string]interface{}{
 		{
-			"products":                  cart["products"],
-			"total_money":               cart["total_money"],
-			"total_origin_money":        cart["total_origin_money"],
-			"goods_real_money":          cart["goods_real_money"],
-			"total_count":               cart["total_count"],
-			"cart_count":                cart["cart_count"],
-			"is_presale":                cart["is_presale"],
-			"instant_rebate_money":      cart["instant_rebate_money"],
-			"coupon_rebate_money":       cart["coupon_rebate_money"],
-			"total_rebate_money":        cart["total_rebate_money"],
-			"used_balance_money":        cart["used_balance_money"],
-			"can_used_balance_money":    cart["can_used_balance_money"],
-			"used_point_num":            cart["used_point_num"],
-			"used_point_money":          cart["used_point_money"],
-			"can_used_point_num":        cart["can_used_point_num"],
-			"can_used_point_money":      cart["can_used_point_money"],
-			"is_share_station":          cart["is_share_station"],
-			"only_today_products":       cart["only_today_products"],
-			"only_tomorrow_products":    cart["only_tomorrow_products"],
-			"package_type":              cart["package_type"],
-			"package_id":                cart["package_id"],
-			"front_package_text":        cart["front_package_text"],
-			"front_package_type":        cart["front_package_type"],
-			"front_package_stock_color": cart["front_package_stock_color"],
-			"front_package_bg_color":    cart["front_package_bg_color"],
-			"eta_trace_id":              "",
-			"reserved_time_start":       reservedTime["reserved_time_start"],
-			"reserved_time_end":         reservedTime["reserved_time_end"],
-			"soon_arrival":              "",
-			"first_selected_big_time":   0,
-			"receipt_without_sku":       0,
+			"products":                cart["products"],
+			"total_money":             cart["total_money"],
+			"total_origin_money":      cart["total_origin_money"],
+			"goods_real_money":        cart["goods_real_money"],
+			"total_count":             cart["total_count"],
+			"cart_count":              cart["cart_count"],
+			"is_presale":              cart["is_presale"],
+			"instant_rebate_money":    cart["instant_rebate_money"],
+			"coupon_rebate_money":     cart["coupon_rebate_money"],
+			"total_rebate_money":      cart["total_rebate_money"],
+			"used_balance_money":      cart["used_balance_money"],
+			"can_used_balance_money":  cart["can_used_balance_money"],
+			"used_point_num":          cart["used_point_num"],
+			"used_point_money":        cart["used_point_money"],
+			"can_used_point_num":      cart["can_used_point_num"],
+			"can_used_point_money":    cart["can_used_point_money"],
+			"is_share_station":        cart["is_share_station"],
+			"only_today_products":     cart["only_today_products"],
+			"only_tomorrow_products":  cart["only_tomorrow_products"],
+			"package_type":            cart["package_type"],
+			"package_id":              cart["package_id"],
+			"eta_trace_id":            "",
+			"reserved_time_start":     reservedTime["reserved_time_start"],
+			"reserved_time_end":       reservedTime["reserved_time_end"],
+			"soon_arrival":            "",
+			"first_selected_big_time": 0,
+			"receipt_without_sku":     0,
 		},
 	}
 	payment := map[string]interface{}{
@@ -287,15 +296,12 @@ func (o *Order) SubmitOrder() (bool, error) {
 	}
 	paymentBytes, _ := json.Marshal(payment)
 
-	o.user.SetBody(map[string]string{
+	client.SetParams(params, map[string]string{
 		"package_order": string(paymentBytes),
-		"showMsg":       "false",
-		"showData":      "true",
-		"ab_config":     `{"key_onion":"C"}`,
+		"ab_config":     `{"key_no_condition_barter":false}`,
 	})
 
-	o.user.SetClient(constants.SubmitOrder)
-	resp, err := o.user.Client().Post(o.user.HeadersDeepCopy(), o.user.BodyDeepCopy())
+	resp, err := client.Post(o.user.Headers(), params)
 	if err != nil {
 		klog.Errorf("提交订单失败, 错误: %s 当前下单总金额：%v", err, cart["total_money"])
 		return false, err

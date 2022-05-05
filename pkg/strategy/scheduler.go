@@ -1,8 +1,25 @@
+/*
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+  http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing,
+software distributed under the License is distributed on an
+"AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+KIND, either express or implied.  See the License for the
+specific language governing permissions and limitations
+under the License.
+*/
+
 package strategy
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"math/rand"
 	"os"
 	"strconv"
@@ -22,13 +39,14 @@ type Scheduler struct {
 	submitOrderTheadSize int     // 提交订单执行线程数
 	minSleepMillis       int     // 请求间隔时间最小值
 	maxSleepMillis       int     // 请求间隔时间最大值
+	pushToken            string
 }
 
 // Run 作为保护线程负责检查订单是否下单成功，2分钟未下单自动终止,避免对叮咚服务器造成压力,也避免封号
 func (s *Scheduler) Run(ctx context.Context) {
 	go func() {
 		var (
-			deadline = time.After(120 * time.Second)
+			deadline = time.After(180 * time.Second)
 			ticker   = time.NewTicker(3 * time.Second)
 		)
 		defer ticker.Stop()
@@ -83,15 +101,6 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 				if cart == nil {
 					continue
 				}
-				if cart["total_money"] == nil {
-					bytes, err := json.Marshal(cart)
-					if err != nil {
-						klog.Errorf("解析购物车信息出错, 错误: %v", err)
-					} else {
-						klog.Infof("获取购物总金额出错，购物车无总金额参数, 详情: %s", string(bytes))
-					}
-					continue
-				}
 				money, err := strconv.ParseFloat(cart["total_money"].(string), 64)
 				if err != nil {
 					klog.Errorf("转换购买金额出错，错误: %v", err)
@@ -100,7 +109,7 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 					return
 				}
 				if money < s.minOrderPrice {
-					klog.Infof("订单金额：%s, 不满足最小金额设置：%s, 继续重试", cart["total_money"], s.minOrderPrice)
+					klog.Infof("订单金额：%f, 不满足最小金额设置：%f, 继续重试", cart["total_money"], s.minOrderPrice)
 				} else {
 					s.o.SetCart(cart)
 				}
@@ -148,16 +157,29 @@ func (s *Scheduler) Schedule(ctx context.Context) error {
 				}
 				// 下单已成功，停止抢菜
 				s.o.SetStop(true)
-
 				klog.Infof("下单成功，请在5分钟内支付金额: %s，否则订单会被叮咚自动取消", s.o.Cart()["total_money"])
 
-				// 播放音乐通知用户
-				if s.play {
-					mp3 := &notice.Mp3{}
-					if err = mp3.Play("./music/everything_I_need.mp3"); err != nil {
-						klog.Error(err)
+				go func() {
+					// 播放音乐通知用户
+					if s.play {
+						mp3 := notice.NewDefaultMp3()
+						if err = mp3.Notify(); err != nil {
+							klog.Error(err)
+						}
+					}
+				}()
+
+				if s.pushToken != "" {
+					// 推送一次即可，失败则重试2次
+					for i := 0; i < 3; i++ {
+						p := notice.NewPush(s.pushToken, "抢菜已成功，请前往APP付款", fmt.Sprintf("下单成功，请在5分钟内支付金额: %v，否则订单会被叮咚自动取消", s.o.Cart()["total_money"]))
+						if err := p.Notify(); err == nil {
+							break
+						}
 					}
 				}
+				// 休眠30s, 让音乐飞一会
+				time.Sleep(time.Second * 30)
 
 				// 正常退出程序
 				os.Exit(0)
